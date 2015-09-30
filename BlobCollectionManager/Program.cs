@@ -12,13 +12,33 @@ namespace BlobCollectionManager
 {
     class Program
     {
+        /// <summary>
+        /// These are environment variables you must set - first is the full path to convert.exe (e.g. c:\imgmgk\convert.exe)
+        /// </summary>
+        private const string ImageMagickPathEnv = "ImageMagickPath";
+        /// <summary>
+        /// ... and second is the connection string to table/blob storage where you want the results.
+        /// </summary>
+        private const string ImageDataConnectionEnv = "ImageDataConnectionString";
+
         static void Main(string[] args)
         {
             Trace.Listeners.Add(new ConsoleTraceListener());
 
-            var uploader = new BlobUploader(AzureUtilities.GetImagesBlobContainerAsync("ImageDataConnectionString").Result);
-            var imgSetTable = AzureUtilities.GetImageSetTable("ImageDataConnectionString").Result;
-            var crawler = new ImageDirectoryCrawler(args[0])
+            if (args.Length != 2)
+            {
+                throw new ArgumentException("Must provide root directory and transform output directory");
+            }
+
+            UploadAndTransform(args[0], args[1]).Wait();
+        }
+
+        private static async Task UploadAndTransform(string rootDir, string transformDir)
+        {
+            var uploader = new BlobUploader(await AzureUtilities.GetImagesBlobContainerAsync(ImageDataConnectionEnv));
+            var imgSetTable = await AzureUtilities.GetImageSetTable(ImageDataConnectionEnv);
+            var imgTransformTable = await AzureUtilities.GetImageTransformTable(ImageDataConnectionEnv);
+            var crawler = new ImageDirectoryCrawler()
             {
                 TagExtractor = x => x.Split('\\'),
                 BlobUploader = (f, b) =>
@@ -34,7 +54,31 @@ namespace BlobCollectionManager
                     return imgSetTable.ExecuteAsync(op);
                 }
             };
-            crawler.WalkTree().Wait();
+
+            var imageMagickPath = Environment.GetEnvironmentVariable(ImageMagickPathEnv);
+            try
+            {
+                // Transform to charcoal...
+                var transform = new ImageTransform("Charcoal", "0")
+                {
+                    CommandLineArguments = "-charcoal 2 {infile} {outfile}"
+                };
+                var upsert = TableOperation.InsertOrReplace(transform);
+                await imgTransformTable.ExecuteAsync(upsert);
+
+                await crawler.TransformTree(rootDir, "0", transform, imageMagickPath, transformDir);
+
+                // Upload initial original images.
+                await crawler.WalkTree(rootDir, "0");
+            }
+            catch (AggregateException e)
+            {
+                Console.WriteLine("Crawling failed:");
+                foreach (var ex in e.InnerExceptions)
+                {
+                    Console.WriteLine(ex.Message);
+                }
+            }
         }
     }
 }

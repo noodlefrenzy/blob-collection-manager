@@ -20,23 +20,43 @@ namespace ImageBlobData
         /// </summary>
         /// <param name="maxWork"></param>
         /// <param name="tasks"></param>
-        /// <returns></returns>
-        public static async Task ThrottleWork(int maxWork, IEnumerable<Task> tasks)
+        /// <returns>Failed tasks.</returns>
+        public static async Task<IEnumerable<Task>> ThrottleWork(int maxWork, IEnumerable<Task> tasks)
         {
             var working = new List<Task>(maxWork);
-            var errors = new List<Exception>();
+            var failures = new List<Task>();
             foreach (var task in tasks)
             {
                 if (working.Count == maxWork)
                 {
                     var completed = await Task.WhenAny(working);
                     working.Remove(completed);
-                    if (completed.IsFaulted)
-                        errors.Add(completed.Exception);
+                    if (completed.Status != TaskStatus.RanToCompletion)
+                        failures.Add(completed);
                 }
                 working.Add(task);
             }
             await Task.WhenAll(working);
+            foreach (var task in working)
+            {
+                if (task.IsFaulted) failures.Add(task);
+            }
+
+            return failures;
+        }
+
+        public static AggregateException AsAggregateException(IEnumerable<Task> failedTasks, Func<Task, string> getMessage)
+        {
+            return new AggregateException(failedTasks.Select(x => AsException(x, getMessage)));
+        }
+
+        public static Exception AsException(Task failedTask, Func<Task, string> getMessage)
+        {
+            var msg = getMessage == null ? null : getMessage(failedTask);
+            if (failedTask.Exception != null) return msg == null ? failedTask.Exception : new Exception(msg, failedTask.Exception);
+            if (failedTask.IsCanceled) return msg == null ? new TaskCanceledException() : new TaskCanceledException(msg);
+
+            throw new ArgumentException("Task not failed.");
         }
     }
 
@@ -65,6 +85,7 @@ namespace ImageBlobData
     {
         public const string ImageBlobContainerName = "images";
         public const string ImageSetTableName = "imagesets";
+        public const string ImageTransformTableName = "imagetransforms";
 
         // Cache the configuration data.
         private static ConcurrentDictionary<string, string> _ConfigurationEntries = new ConcurrentDictionary<string, string>();
@@ -110,8 +131,18 @@ namespace ImageBlobData
         /// <param name="connectionStringOrKey"></param>
         /// <param name="tableName"></param>
         /// <returns></returns>
-        public static async Task<CloudTable> GetImageSetTable(string connectionStringOrKey, string tableName = ImageSetTableName)
+        public static Task<CloudTable> GetImageSetTable(string connectionStringOrKey, string tableName = ImageSetTableName)
         {
+            return GetTable(connectionStringOrKey, tableName);
+        }
+
+        public static Task<CloudTable> GetImageTransformTable(string connectionStringOrKey, string tableName = ImageTransformTableName)
+        {
+            return GetTable(connectionStringOrKey, tableName);
+        }
+
+        private static async Task<CloudTable> GetTable(string connectionStringOrKey, string tableName)
+        { 
             if (string.IsNullOrWhiteSpace(tableName)) throw new ArgumentNullException("tableName");
 
             var tableClient = GetStorageAccount(connectionStringOrKey).CreateCloudTableClient();
